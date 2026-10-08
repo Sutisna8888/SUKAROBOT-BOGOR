@@ -1,0 +1,462 @@
+/* ==========================================================================
+   LIGHT-TECH HUD INSTRUCTOR SECTION STYLES (HARMONIOUS & SOFTER TONES)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800;900&family=Rajdhani:wght@600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
+
+/* Main Section */
+.cyber-instructor-section {
+    position: relative;
+    overflow: hidden;
+}
+
+/* Section Title - Unique & Clean Tech Display (Orbitron) */
+.cyber-title {
+    font-family: 'Orbitron', sans-serif;
+    color: #0f172a;
+    letter-spacing: 0.01em;
+    font-weight: 800;
+}
+
+.cyber-subtitle {
+    font-family: inherit;
+    color: #64748b;
+    letter-spacing: normal;
+}
+
+/* RGB Spectrum Border Flow Animation */
+@keyframes rgbBorderFlow {
+    0% {
+        background-position: 0% 50%;
+    }
+    50% {
+        background-position: 100% 50%;
+    }
+    100% {
+        background-position: 0% 50%;
+    }
+}
+
+/* Swiper Container Glow Clearance - Compact Padding */
+.instructorSwiper {
+    overflow: visible !important;
+    padding: 8px 4px 10px 4px !important;
+}
+
+/* Stacked Multi-layer Card Container - Compact 3-Column Fit */
+.cyber-card-wrapper {
+    position: relative;
+    padding: 4px 6px 8px 4px;
+    height: 100%;
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), filter 0.35s ease;
+}
+
+/* Subtle & Refined RGB Edge Glow on Hover (Not overly sharp or large) */
+.cyber-card-wrapper:hover {
+    transform: translateY(-5px);
+    filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.45)) 
+            drop-shadow(0 0 14px rgba(6, 182, 212, 0.3));
+}
+
+/* Layer 3: Back-most Shadow Stack (RGB Ambient Aura) */
+.cyber-card-layer-3 {
+    position: absolute;
+    inset: 8px 4px 4px 8px;
+    background: linear-gradient(135deg, rgba(244, 63, 94, 0.22) 0%, rgba(168, 85, 247, 0.22) 35%, rgba(59, 130, 246, 0.22) 70%, rgba(6, 182, 212, 0.22) 100%);
+    background-size: 200% 200%;
+    animation: rgbBorderFlow 8s ease infinite;
+    border-radius: 2px;
+    clip-path: polygon(
+        0 0,
+        36% 0,
+        42% 12px,
+        calc(100% - 16px) 12px,
+        100% 28px,
+        100% calc(100% - 14px),
+        calc(100% - 14px) 100%,
+        14px 100%,
+        0 calc(100% - 14px)
+    );
+    opacity: 0.5;
+    box-shadow: 0 4px 12px rgba(168, 85, 247, 0.08);
+    z-index: 1;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cyber-card-wrapper:hover .cyber-card-layer-3 {
+    opacity: 0.75;
+    animation-duration: 3.5s;
+    background: linear-gradient(135deg, rgba(244, 63, 94, 0.3) 0%, rgba(168, 85, 247, 0.35) 35%, rgba(6, 182, 212, 0.35) 70%, rgba(16, 185, 129, 0.25) 100%);
+    filter: blur(4px);
+    transform: translate(2px, 2px);
+}
+
+/* Layer 2: Middle Stack (Defined Neutral Rim) */
+.cyber-card-layer-2 {
+    position: absolute;
+    inset: 4px 5px 5px 4px;
+    background: #ffffff;
+    border: 1.5px solid rgba(168, 85, 247, 0.2);
+    clip-path: polygon(
+        0 0,
+        36% 0,
+        42% 12px,
+        calc(100% - 16px) 12px,
+        100% 28px,
+        100% calc(100% - 14px),
+        calc(100% - 14px) 100%,
+        14px 100%,
+        0 calc(100% - 14px)
+    );
+    z-index: 2;
+    transition: all 0.35s ease;
+}
+
+.cyber-card-wrapper:hover .cyber-card-layer-2 {
+    border-color: rgba(6, 182, 212, 0.45);
+}
+
+/* Layer 1: Front Card Border Frame (RGB Spectrum Contour + Dynamic Glow) */
+.cyber-card-front-border {
+    position: relative;
+    background: linear-gradient(135deg, #f43f5e 0%, #a855f7 25%, #3b82f6 50%, #06b6d4 75%, #10b981 100%);
+    background-size: 250% 250%;
+    animation: rgbBorderFlow 8s ease infinite;
+    padding: 2px; /* Sleek and crisp 2px border */
+    clip-path: polygon(
+        0 0,
+        36% 0,
+        42% 12px,
+        calc(100% - 16px) 12px,
+        100% 28px,
+        100% calc(100% - 14px),
+        calc(100% - 14px) 100%,
+        14px 100%,
+        0 calc(100% - 14px)
+    );
+    filter: drop-shadow(0 4px 8px rgba(168, 85, 247, 0.12));
+    z-index: 3;
+    height: 100%;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Hover: Smooth flowing RGB outline */
+.cyber-card-wrapper:hover .cyber-card-front-border {
+    animation-duration: 3s;
+    background: linear-gradient(135deg, #f43f5e 0%, #8b5cf6 25%, #0ea5e9 50%, #06b6d4 75%, #10b981 100%);
+}
+
+/* Front Card Interior - Clean Pure White */
+.cyber-card-content {
+    background-color: #ffffff;
+    clip-path: polygon(
+        0 0,
+        36% 0,
+        42% 12px,
+        calc(100% - 16px) 12px,
+        100% 28px,
+        100% calc(100% - 14px),
+        calc(100% - 14px) 100%,
+        14px 100%,
+        0 calc(100% - 14px)
+    );
+    padding: 22px 20px 20px 20px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    transition: box-shadow 0.35s ease;
+}
+
+.cyber-card-wrapper:hover .cyber-card-content {
+    box-shadow: inset 0 0 10px rgba(168, 85, 247, 0.05);
+}
+
+/* Octagonal Avatar Box - RGB Spectrum Accent with Soft Hover Glow */
+.cyber-avatar-frame {
+    position: relative;
+    width: 86px;
+    height: 86px;
+    flex-shrink: 0;
+    background: linear-gradient(135deg, #f43f5e 0%, #a855f7 35%, #3b82f6 70%, #06b6d4 100%);
+    background-size: 200% 200%;
+    animation: rgbBorderFlow 6s ease infinite;
+    padding: 2px;
+    clip-path: polygon(28% 0%, 72% 0%, 100% 28%, 100% 72%, 72% 100%, 28% 100%, 0% 72%, 0% 28%);
+    filter: drop-shadow(0 2px 4px rgba(168, 85, 247, 0.15));
+    transition: all 0.35s ease;
+}
+
+.cyber-card-wrapper:hover .cyber-avatar-frame {
+    animation-duration: 3s;
+    filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.5));
+}
+
+.cyber-avatar-inner {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background-color: #f8fafc;
+    clip-path: polygon(28% 0%, 72% 0%, 100% 28%, 100% 72%, 72% 100%, 28% 100%, 0% 72%, 0% 28%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.cyber-avatar-inner img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    position: relative;
+    z-index: 2;
+}
+
+/* Wireframe Globe Background */
+.cyber-wireframe-globe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+    opacity: 0.22;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
+}
+
+.cyber-card-wrapper:hover .cyber-wireframe-globe {
+    opacity: 0.45;
+}
+
+/* Instructor Name & Title - Elegant Slate & Tech Cyan */
+.cyber-name {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: #0f172a; /* Slate 900 */
+    letter-spacing: 0.01em;
+    line-height: 1.25;
+}
+
+.cyber-role {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #0284c7; /* Sky 600 */
+}
+
+/* Terminal Bio Box - Soft Slate Recessed Box */
+.cyber-bio-box {
+    background-color: #f8fafc;
+    border: 1px solid #f1f5f9;
+    clip-path: polygon(
+        0 0,
+        100% 0,
+        100% calc(100% - 8px),
+        calc(100% - 8px) 100%,
+        8px 100%,
+        0 calc(100% - 8px)
+    );
+    padding: 13px 15px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    color: #64748b; /* Soft Slate 500 */
+    margin-top: 14px;
+    min-height: 88px;
+    flex-grow: 1;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
+    transition: all 0.3s ease;
+}
+
+.cyber-card-wrapper:hover .cyber-bio-box {
+    border-color: #e2e8f0;
+    background-color: #fdfdfd;
+}
+
+/* Compact profile action row for the instructor directory cards */
+.cyber-profile-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 9px;
+    padding: 7px 4px 2px;
+    border-top: 1px solid #f1f5f9;
+}
+
+.cyber-experience {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    color: #64748b;
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.cyber-experience i {
+    color: #94a3b8;
+    flex-shrink: 0;
+}
+
+.cyber-profile-btn {
+    border: 0;
+    padding: 6px 13px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #168bd5 0%, #7656e8 100%);
+    color: #ffffff;
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 700;
+    white-space: nowrap;
+    cursor: pointer;
+    box-shadow: 0 3px 8px rgba(37, 99, 235, 0.16);
+    transition: filter 0.2s ease, transform 0.2s ease;
+}
+
+.cyber-profile-btn:hover {
+    filter: brightness(1.06);
+    transform: translateY(-1px);
+}
+
+/* ==========================================================================
+   CUSTOM HUD CTA BUTTON ("Lihat Semua Instruktur")
+   ========================================================================== */
+.cyber-cta-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5px;
+    text-decoration: none;
+    background: linear-gradient(135deg, #f43f5e 0%, #a855f7 25%, #3b82f6 50%, #06b6d4 75%, #10b981 100%);
+    background-size: 250% 250%;
+    animation: rgbBorderFlow 8s ease infinite;
+    clip-path: polygon(
+        12px 0%,
+        100% 0%,
+        100% calc(100% - 12px),
+        calc(100% - 12px) 100%,
+        0% 100%,
+        0% 12px
+    );
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), filter 0.3s ease;
+    box-shadow: 0 4px 12px rgba(168, 85, 247, 0.08);
+}
+
+.cyber-cta-btn:hover {
+    transform: translateY(-3px);
+    animation-duration: 3s;
+    filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.45)) drop-shadow(0 0 14px rgba(6, 182, 212, 0.3));
+}
+
+.cyber-cta-btn-inner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
+    background-color: #ffffff;
+    clip-path: polygon(
+        12px 0%,
+        100% 0%,
+        100% calc(100% - 12px),
+        calc(100% - 12px) 100%,
+        0% 100%,
+        0% 12px
+    );
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: 0.02em;
+    color: #0f172a;
+    transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.cyber-cta-btn:hover .cyber-cta-btn-inner {
+    background-color: #f8fafc;
+    color: #0284c7;
+}
+
+.cyber-cta-btn-inner .cta-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    background: #f0f9ff;
+    color: #0284c7;
+    font-size: 0.72rem;
+    transition: transform 0.25s ease, background-color 0.25s ease, color 0.25s ease;
+}
+
+.cyber-cta-btn:hover .cta-arrow {
+    transform: translateX(4px);
+    background: #0284c7;
+    color: #ffffff;
+}
+
+/* ==========================================================================
+   "LIHAT SELENGKAPNYA" HOVER OVERLAY ON CARD
+   ========================================================================== */
+.cyber-card-overlay-link {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    z-index: 10;
+    display: flex;
+    width: max-content;
+    max-width: calc(100% - 32px);
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 12px;
+    background: linear-gradient(135deg, rgba(2, 132, 199, 0.96) 0%, rgba(168, 85, 247, 0.94) 100%);
+    color: #ffffff;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
+    text-decoration: none;
+    clip-path: polygon(
+        0 0,
+        100% 0,
+        100% calc(100% - 7px),
+        calc(100% - 7px) 100%,
+        7px 100%,
+        0 calc(100% - 7px)
+    );
+    transform: translate(-50%, 100%);
+    opacity: 0;
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+    cursor: pointer;
+    border: 0;
+    font: inherit;
+}
+
+.cyber-card-wrapper:hover .cyber-card-overlay-link {
+    transform: translate(-50%, 0);
+    opacity: 1;
+}
+
+.cyber-card-overlay-link .overlay-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    font-size: 0.65rem;
+    transition: transform 0.25s ease, background 0.25s ease;
+}
+
+.cyber-card-wrapper:hover .cyber-card-overlay-link .overlay-arrow {
+    transform: translateX(3px);
+    background: rgba(255, 255, 255, 0.35);
+}
+
+/* Ensure the front card border has relative positioning for overlay */
+.cyber-card-front-border {
+    overflow: hidden;
+}

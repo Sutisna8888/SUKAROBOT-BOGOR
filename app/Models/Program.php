@@ -1,0 +1,88 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Program extends Model
+{
+    protected $table = 'data_programs';
+
+    protected $fillable = [
+        'program',
+        'slug',
+        'description',
+        'price',
+        'category',
+        'type',
+        'image',
+        'zoom_link',
+        'status',
+        'instructor_id',
+        'quota',
+        'enrolled_count',
+        'rating',
+        'total_reviews',
+        'province',
+        'city',
+        'district',
+        'village',
+        'full_address',
+        'start_date',
+        'start_time',
+        'end_date',
+        'end_time',
+        'competition_date',
+        'tools',
+        'learning_materials',
+        'benefits',
+    ];
+
+    protected $casts = [
+        'tools' => 'array',
+        'learning_materials' => 'array',
+        'benefits' => 'array',
+        'price' => 'decimal:2',
+        'rating' => 'decimal:1',
+        'start_date' => 'date',
+        'end_date' => 'date',
+        'competition_date' => 'date',
+    ];
+
+    /**
+     * Relation to Instructor (data_trainers)
+     */
+    public function instructor()
+    {
+        return $this->belongsTo(\App\Models\Instructor::class, 'instructor_id');
+    }
+
+    /**
+     * Relation to Transactions
+     */
+    public function transactions()
+    {
+        return $this->hasMany(\App\Models\Transaction::class, 'program_id');
+    }
+
+    public function trainingBookings()
+    {
+        return $this->hasMany(\App\Models\TrainingBooking::class, 'program_id');
+    }
+
+    /**
+     * Relation to LMS Sections
+     */
+    public function sections()
+    {
+        return $this->hasMany(\App\Models\CourseSection::class, 'program_id')->orderBy('order', 'asc');
+    }
+
+    /**
+     * Relation to LMS Assignments (Post-test)
+     */
+    public function assignments()
+    {
+        return $this->hasMany(\App\Models\CourseAssignment::class, 'program_id');
+    }
+}

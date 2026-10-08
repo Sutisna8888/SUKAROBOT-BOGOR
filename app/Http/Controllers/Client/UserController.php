@@ -1,0 +1,598 @@
+<?php
+
+namespace App\Http\Controllers\Client;
+
+use App\Http\Controllers\Controller;
+use App\Models\Transaction;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\DB;
+use App\Http\Controllers\Admin\CertificateController;
+use App\Models\CourseAssignment;
+use App\Models\CourseSubmission;
+use App\Models\TrainingBooking;
+
+class UserController extends Controller
+{
+    // Controller methods for user-related actions can be added here
+    public function profile(Request $request)
+    {
+        if ($request->has('cancel')) {
+            session()->flash('error', 'Batal memperbarui profil.');
+            return redirect()->route('client.dashboard');
+        }
+
+        // Logic to display user profile
+        $user = Auth::user(); // ambil data user dari database
+        
+        // Check for instructor application
+        $instructorApplication = DB::table('instructor_applications')
+            ->where('user_id', $user->id)
+            ->orderBy('created_at', 'desc')
+            ->first();
+
+        // Auto-update role if application is approved but role is not yet 'instructor'
+        if ($instructorApplication && $instructorApplication->status == 'approved' && $user->role !== 'instructor') {
+            DB::table('users')->where('id', $user->id)->update(['role' => 'instructor']);
+            $user->role = 'instructor'; // Update instance for view
+        }
+
+        return view('client.dashboard.profile', compact('user', 'instructorApplication'));
+    }
+
+    public function program()
+    {
+        $user = Auth::user();
+
+        $trainingBookings = TrainingBooking::with(['program', 'dates', 'transactions'])
+            ->where('student_id', $user->id)
+            ->whereIn('schedule_status', ['pending_admin', 'approved', 'rejected'])
+            ->whereNull('locked_at')
+            ->whereDoesntHave('transactions', function ($query) {
+                $query->where('status', 'paid');
+            })
+            ->latest()
+            ->get();
+        
+        // Get enrolled programs for the user
+        $enrollments = DB::table('enrollments')
+            ->join('data_programs', 'enrollments.program_id', '=', 'data_programs.id')
+            ->leftJoin('data_trainers', 'data_programs.instructor_id', '=', 'data_trainers.id')
+            ->leftJoin('program_proofs', function($join) use ($user) {
+                $join->on('enrollments.student_id', '=', 'program_proofs.student_id')
+                     ->on('enrollments.program_id', '=', 'program_proofs.program_id');
+            })
+            ->select(
+                'enrollments.*',
+                'data_programs.program as program_name',
+                'data_programs.slug',
+                'data_programs.image',
+                'data_programs.category',
+                'data_programs.type',
+                'data_programs.start_date',
+                'data_programs.end_date',
+                'data_trainers.nama as instructor_name',
+                'program_proofs.status as proof_status',
+                'program_proofs.id as proof_id'
+            )
+            ->where('enrollments.student_id', $user->id)
+            ->orderBy('enrollments.created_at', 'desc')
+            ->get();
+
+        $programIds = $enrollments->pluck('program_id')->filter()->unique()->values();
+        $lessonTotalsByProgram = collect();
+        $completedTotalsByProgram = collect();
+        $posttestAssignmentsByProgram = collect();
+        $posttestSubmissionsByAssignment = collect();
+
+        if ($programIds->isNotEmpty()) {
+            $lessonTotalsByProgram = DB::table('lms_sections')
+                ->join('lms_lessons', 'lms_sections.id', '=', 'lms_lessons.section_id')
+                ->selectRaw('lms_sections.program_id, COUNT(lms_lessons.id) as total_lessons')
+                ->whereIn('lms_sections.program_id', $programIds)
+                ->groupBy('lms_sections.program_id')
+                ->pluck('total_lessons', 'lms_sections.program_id');
+
+            $completedTotalsByProgram = DB::table('lms_progresses as progress')
+                ->join('lms_lessons as lessons', 'progress.lesson_id', '=', 'lessons.id')
+                ->join('lms_sections as sections', 'lessons.section_id', '=', 'sections.id')
+                ->selectRaw('sections.program_id, COUNT(DISTINCT progress.lesson_id) as completed_lessons')
+                ->where('progress.user_id', $user->id)
+                ->where('progress.is_completed', true)
+                ->whereIn('sections.program_id', $programIds)
+                ->groupBy('sections.program_id')
+                ->pluck('completed_lessons', 'sections.program_id');
+
+            $posttestAssignments = CourseAssignment::whereIn('program_id', $programIds)
+                ->where('type', 'post-test')
+                ->get(['id', 'program_id', 'passing_score']);
+            $posttestAssignmentsByProgram = $posttestAssignments
+                ->groupBy('program_id');
+
+            $assignmentIds = $posttestAssignments->pluck('id');
+            if ($assignmentIds->isNotEmpty()) {
+                $posttestSubmissionsByAssignment = CourseSubmission::where('user_id', $user->id)
+                    ->whereIn('assignment_id', $assignmentIds)
+                    ->get(['assignment_id', 'score'])
+                    ->keyBy('assignment_id');
+            }
+        }
+
+        $enrollments = $enrollments->map(function ($enrollment) use (
+            $lessonTotalsByProgram,
+            $completedTotalsByProgram,
+            $posttestAssignmentsByProgram,
+            $posttestSubmissionsByAssignment
+        ) {
+            $isCourseProgram = $this->isCourseCategory($enrollment->category ?? null);
+            $totalMaterials = $isCourseProgram
+                ? (int) ($lessonTotalsByProgram[$enrollment->program_id] ?? 0)
+                : 0;
+
+            $completedMaterials = $isCourseProgram
+                ? (int) ($completedTotalsByProgram[$enrollment->program_id] ?? 0)
+                : 0;
+
+            if ($totalMaterials > 0) {
+                $completedMaterials = min($completedMaterials, $totalMaterials);
+            }
+
+            $progressPercent = ($isCourseProgram && $totalMaterials > 0)
+                ? (int) round(($completedMaterials / $totalMaterials) * 100)
+                : 0;
+            $isCourseCompleted = $isCourseProgram && $totalMaterials > 0 && $completedMaterials >= $totalMaterials;
+
+            $posttestAssignments = $posttestAssignmentsByProgram
+                ->get($enrollment->program_id, collect());
+            $hasPosttests = $posttestAssignments->isNotEmpty();
+            $passedPosttests = true;
+
+            if ($isCourseProgram && $hasPosttests) {
+                $passedPosttests = $posttestAssignments->every(function ($assignment) use ($posttestSubmissionsByAssignment) {
+                    $submission = $posttestSubmissionsByAssignment->get($assignment->id);
+                    $passingScore = $assignment->passing_score ?? 70;
+
+                    return $submission
+                        && $submission->score !== null
+                        && $submission->score >= $passingScore;
+                });
+            }
+
+            $canSubmitProof = !$enrollment->proof_id && (
+                $isCourseProgram
+                    ? ($isCourseCompleted && $passedPosttests)
+                    : \Carbon\Carbon::parse($enrollment->end_date)->isPast()
+            );
+
+            $enrollment->is_course_program = $isCourseProgram;
+            $enrollment->total_materials = $totalMaterials;
+            $enrollment->completed_materials = $completedMaterials;
+            $enrollment->progress_percent = $progressPercent;
+            $enrollment->is_course_completed = $isCourseCompleted;
+            $enrollment->passed_posttests = $passedPosttests;
+            $enrollment->can_submit_proof = $canSubmitProof;
+            $enrollment->course_status_label = $isCourseProgram
+                ? ($isCourseCompleted ? 'Selesai' : 'Berjalan')
+                : null;
+
+            return $enrollment;
+        });
+
+        return view('client.dashboard.program', compact('enrollments', 'trainingBookings'));
+    }
+
+    private function isCourseCategory(?string $category): bool
+    {
+        return strtolower(trim((string) $category)) === 'kursus';
+    }
+
+    public function certificate()
+    {
+        $user = Auth::user();
+
+        // Get approved program proofs for this user
+        $proofs = DB::table('program_proofs')
+            ->join('data_programs', 'program_proofs.program_id', '=', 'data_programs.id')
+            ->select(
+                'program_proofs.id as proof_id',
+                'program_proofs.program_id',
+                'program_proofs.student_id',
+                'program_proofs.updated_at as approved_at',
+                'data_programs.program as program_name'
+            )
+            ->where('program_proofs.student_id', $user->id)
+            ->where('program_proofs.status', 'accepted')
+            ->get();
+
+        $certificates = [];
+
+        foreach ($proofs as $proof) {
+            // Check if certificate exists
+            $certificate = DB::table('certificates')
+                ->where('user_id', $user->id)
+                ->where('program_id', $proof->program_id)
+                ->first();
+
+            // If not exists, try to generate it (Lazy Generation)
+            if (!$certificate) {
+                // Check if template exists
+                if (CertificateController::hasTemplateForProgram($proof->program_id)) {
+                    $template = CertificateController::getTemplateForProgram($proof->program_id);
+                    
+                    // Generate
+                    $result = CertificateController::generateCertificateForUser(
+                        $template->id,
+                        $proof->program_id,
+                        $user->id,
+                        $proof->proof_id
+                    );
+
+                    if ($result['success']) {
+                        // Fetch newly generated certificate
+                        $certificate = DB::table('certificates')
+                            ->where('id', $result['certificate_id'])
+                            ->first();
+                    }
+                }
+            }
+
+            // If we have a certificate (existing or newly generated)
+            if ($certificate) {
+                $certificates[] = (object) [
+                    'id' => $certificate->id,
+                    'program_name' => $proof->program_name,
+                    'issued_at' => is_string($certificate->issued_at) ? \Carbon\Carbon::parse($certificate->issued_at) : $certificate->issued_at,
+                    'certificate_number' => $certificate->certificate_number
+                ];
+            }
+        }
+
+        return view('client.dashboard.certificate', compact('certificates'));
+    }
+
+    public function downloadCertificate($id)
+    {
+        $user = Auth::user();
+        
+        $certificate = DB::table('certificates')
+            ->where('id', $id)
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (!$certificate) {
+            return back()->with('error', 'Sertifikat tidak ditemukan.');
+        }
+
+        try {
+            // Get file path
+            // stored path is like "storage/certificates/generated/filename.png"
+            // or relative path depending on how it was saved.
+            // Based on CertificateController::renderCertificateImage:
+            // return 'storage/certificates/generated/' . $fileName;
+            
+            // We need absolute path for file_get_contents
+            // If it starts with storage/, we assume it's in public/storage linked to storage/app/public
+            
+            $path = $certificate->certificate_file;
+            $localPath = null;
+
+            if (!empty($path)) {
+                if (str_starts_with($path, 'storage/')) {
+                    // It is in public/storage
+                    $localPath = public_path($path);
+                } else {
+                    // Assume relative to storage/app/public ?
+                    $localPath = storage_path('app/public/' . $path);
+                }
+            }
+
+            if (!$localPath || !is_file($localPath)) {
+                // Try fallback logic
+                if (file_exists(public_path($path)) && is_file(public_path($path))) {
+                    $localPath = public_path($path);
+                } else {
+                    // SELF-HEALING: File missing, regenerate it
+                    // 1. Get necessary data before deleting
+                    $programId = $certificate->program_id;
+                    $userId = $certificate->user_id;
+                    $proofId = $certificate->proof_id;
+                    $templateId = $certificate->template_id;
+                    
+                    // 2. Delete existing record
+                    DB::table('certificates')->where('id', $certificate->id)->delete();
+                    
+                    // 3. Regenerate
+                    $result = CertificateController::generateCertificateForUser(
+                        $templateId,
+                        $programId,
+                        $userId,
+                        $proofId
+                    );
+                    
+                    if ($result['success']) {
+                        // 4. Update local variables
+                        $certificate = DB::table('certificates')
+                            ->where('id', $result['certificate_id'])
+                            ->first();
+                            
+                        $path = $certificate->certificate_file;
+                        
+                        // Check if path is valid after regeneration
+                        if (empty($path)) {
+                             return back()->with('error', 'Gagal membuat ulang sertifikat: Template sertifikat mungkin hilang.');
+                        }
+
+                        // Re-determine local path
+                        if (str_starts_with($path, 'storage/')) {
+                            $localPath = public_path($path);
+                        } else {
+                            $localPath = storage_path('app/public/' . $path);
+                        }
+                        
+                        // Verify again
+                        if (!is_file($localPath)) {
+                             return back()->with('error', 'Gagal membuat ulang sertifikat: File tetap tidak ditemukan.');
+                        }
+                    } else {
+                        return back()->with('error', 'Gagal membuat ulang sertifikat: ' . $result['message']);
+                    }
+                }
+            }
+
+            $imageContent = file_get_contents($localPath);
+            $base64Image = base64_encode($imageContent);
+            
+            // Detect mime type
+            $finfo = new \finfo(FILEINFO_MIME_TYPE);
+            $mimeType = $finfo->buffer($imageContent);
+
+            // Create HTML for PDF
+            $html = '
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    @page { margin: 0; size: A4 landscape; }
+                    body { margin: 0; padding: 0; }
+                    img { width: 100%; height: 100%; object-fit: contain; display: block; }
+                </style>
+            </head>
+            <body>
+                <img src="data:' . $mimeType . ';base64,' . $base64Image . '" />
+            </body>
+            </html>';
+
+            $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadHTML($html);
+            $pdf->setPaper('a4', 'landscape');
+
+            $filename = 'Sertifikat_' . str_replace(' ', '_', $user->name) . '_' . date('Ymd') . '.pdf';
+
+            return $pdf->download($filename);
+
+        } catch (\Exception $e) {
+            return back()->with('error', 'Gagal mengunduh sertifikat: ' . $e->getMessage());
+        }
+    }
+
+    public function transaction()
+    {
+        $user = Auth::user();
+
+        // Get all transactions for the user with program details
+        $transactions = Transaction::where('student_id', $user->id)
+            ->with(['program' => function($query) {
+                $query->select('id', 'program', 'slug', 'image', 'price');
+            }, 'trainingBooking.dates'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        // Mark expired pending transactions
+        foreach ($transactions as $transaction) {
+            if ($transaction->status === 'pending' && $transaction->isExpired()) {
+                $transaction->status = 'expired';
+                $transaction->save();
+            }
+        }
+
+        // Reload to get updated statuses
+        $transactions = Transaction::where('student_id', $user->id)
+            ->with(['program' => function($query) {
+                $query->select('id', 'program', 'slug', 'image', 'price');
+            }, 'trainingBooking.dates'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return view('client.dashboard.transaction', compact('transactions'));
+    }
+
+    public function voucher()
+    {
+        // Ambil voucher yang aktif dan sesuai tanggal
+        $vouchers = \App\Models\Voucher::where('is_active', true)
+            ->where(function ($query) {
+                $query->whereNull('start_date')
+                      ->orWhere('start_date', '<=', now());
+            })
+            ->where(function ($query) {
+                $query->whereNull('end_date')
+                      ->orWhereDate('end_date', '>=', now()->toDateString());
+            })
+            ->get()
+            ->filter(function ($voucher) {
+                // Filter tambahan untuk mengecek kuota penggunaan
+                return $voucher->isValid();
+            });
+
+        return view('client.dashboard.voucher', compact('vouchers'));
+    }
+
+    public function updateProfile(Request $request)
+    {
+        // Logic to update user profile
+        $user = Auth::user();
+        
+        // Check if user is SSO (Google) user
+        $isSsoUser = ($user->provider === 'google');
+        
+        // Build validation rules
+        $rules = [
+            'name' => 'required|string|min:3|max:255',
+            'username' => ['nullable', 'string', 'max:255', 'alpha_dash', Rule::unique('users', 'username')->ignore($user->id)],
+
+            'phone' => 'nullable|string|min:10|max:20',
+            'job' => 'nullable|string|max:100',
+            'address' => 'nullable|string|max:255',
+            'avatar' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'new_password' => 'nullable|min:8',
+            'new_password_confirmation' => 'nullable|same:new_password',
+        ];
+        
+        // Check for password update requirement
+        // Manual users OR SSO users who have already set a password must provide current password
+        $hasSetPassword = $user->password_updated_at !== null;
+        $requiresCurrentPassword = !$isSsoUser || $hasSetPassword;
+        
+        if ($requiresCurrentPassword) {
+            $rules['current_password'] = 'nullable|required_with:new_password';
+        }
+        
+        // Validasi
+        $validated = $request->validate($rules, [
+            // Custom error massage
+            'name.required' => 'Nama wajib diisi',
+            'username.unique' => 'Username sudah digunakan',
+            'username.alpha_dash' => 'Username hanya boleh berisi huruf, angka, dash dan underscore',
+
+            'phone.regex' => 'Format nomor telepon tidak valid',
+            'job.max' => 'Pekerjaan maksimal 100 karakter',
+            'address.max' => 'Alamat maksimal 255 karakter',
+            'new_password.min' => 'Kata sandi baru minimal 8 karakter',
+            'new_password_confirmation.same' => 'Konfirmasi kata sandi tidak cocok',
+            'current_password.required_with' => 'Kata sandi lama wajib diisi jika ingin mengubah kata sandi',
+            'avatar.max' => 'Ukuran gambar maksimal 2048 KB',
+        ]);
+
+        // Update data user
+        $user->name = $validated['name'];
+        $user->username = $validated['username'] ?? $user->username;
+
+        $user->phone = $validated['phone'];
+        $user->job = $validated['job'];
+        $user->address = $validated['address'];
+        if ($request->hasFile('avatar')) {
+            $avatar = $request->file('avatar');
+            $avatarName = time() . '_' . $user->id . '.' . $avatar->getClientOriginalExtension();
+            
+            // Delete old avatar from storage
+            if ($user->avatar && Storage::disk('public')->exists($user->avatar)) {
+                Storage::disk('public')->delete($user->avatar);
+            } elseif ($user->avatar && file_exists(public_path($user->avatar))) {
+                // Fallback: delete from old public path
+                @unlink(public_path($user->avatar));
+            }
+            
+            // Store new avatar to storage/app/public/users/
+            $avatarPath = $avatar->storeAs('users', $avatarName, 'public');
+            $user->avatar = $avatarPath;
+        }
+
+        // Update password
+        if (!empty($validated['new_password'])) {
+            $requiresCurrentPassword = (!$isSsoUser || ($user->password_updated_at !== null));
+
+            // Verify current password if required
+            if ($requiresCurrentPassword) {
+                if (!Hash::check($validated['current_password'], $user->password)) {
+                    return back()->with('error', 'Kata sandi saat ini salah.')->withInput();
+                }
+            }
+
+            $user->password = Hash::make($validated['new_password']);
+            $user->password_updated_at = now();
+        }
+
+        $user->save();
+
+        return back()->with('success', 'Profil berhasil diperbarui.');
+    }
+
+    public function updateAvatar(Request $request)
+    {
+        $request->validate([
+            'avatar' => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
+        ], [
+            'avatar.required' => 'Pilih gambar terlebih dahulu',
+            'avatar.image' => 'File harus berupa gambar',
+            'avatar.mimes' => 'Format gambar harus jpeg, png, jpg, atau gif',
+            'avatar.max' => 'Ukuran gambar maksimal 2MB',
+        ]);
+
+        $user = Auth::user();
+
+        if ($request->hasFile('avatar')) {
+            $avatar = $request->file('avatar');
+            $avatarName = time() . '_' . $user->id . '.' . $avatar->getClientOriginalExtension();
+            
+            // Delete old avatar from storage
+            if ($user->avatar && Storage::disk('public')->exists($user->avatar)) {
+                Storage::disk('public')->delete($user->avatar);
+            } elseif ($user->avatar && file_exists(public_path($user->avatar))) {
+                @unlink(public_path($user->avatar));
+            }
+            
+            $avatarPath = $avatar->storeAs('users', $avatarName, 'public');
+            $user->avatar = $avatarPath;
+            $user->save();
+
+            return back()->with('success', 'Foto profil berhasil diperbarui.');
+        }
+
+        return back()->with('error', 'Gagal mengupload gambar.');
+    }
+
+    public function deleteAvatar()
+    {
+        $user = Auth::user();
+
+        if ($user->avatar) {
+            // Delete from storage
+            if (Storage::disk('public')->exists($user->avatar)) {
+                Storage::disk('public')->delete($user->avatar);
+            } elseif (file_exists(public_path($user->avatar))) {
+                @unlink(public_path($user->avatar));
+            }
+
+            // Update database
+            $user->avatar = null;
+            $user->save();
+
+            return back()->with('success', 'Foto profil berhasil dihapus.');
+        }
+
+        return back()->with('error', 'Anda belum memasang foto profil.');
+    }
+
+    /**
+     * Check if username is available (AJAX endpoint)
+     */
+    public function checkUsername(Request $request)
+    {
+        $username = $request->get('username');
+        $userId = Auth::id();
+        
+        if (empty($username)) {
+            return response()->json(['available' => true]);
+        }
+        
+        // Check if username exists (excluding current user)
+        $exists = DB::table('users')
+            ->where('username', $username)
+            ->where('id', '!=', $userId)
+            ->exists();
+        
+        return response()->json(['available' => !$exists]);
+    }
+}

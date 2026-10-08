@@ -1,0 +1,776 @@
+<?php
+
+namespace App\Http\Controllers\Client;
+
+use App\Http\Controllers\Controller;
+use App\Models\Transaction;
+use App\Models\TrainingBooking;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
+use Carbon\Carbon;
+use Midtrans\Config;
+use Midtrans\Snap;
+use Midtrans\Notification;
+
+class PaymentController extends Controller
+{
+    public function __construct()
+    {
+        // Set Midtrans configuration
+        Config::$serverKey = config('midtrans.server_key');
+        Config::$isProduction = config('midtrans.is_production');
+        Config::$isSanitized = config('midtrans.is_sanitized');
+        Config::$is3ds = config('midtrans.is_3ds');
+    }
+
+    /**
+     * Lock a training booking only after a successful payment.
+     */
+    private function lockTrainingBooking(Transaction $transaction): void
+    {
+        if (!$transaction->training_booking_id) {
+            return;
+        }
+
+        DB::transaction(function () use ($transaction) {
+            $booking = TrainingBooking::with('dates')
+                ->lockForUpdate()
+                ->findOrFail($transaction->training_booking_id);
+
+            if ($booking->locked_at) {
+                return;
+            }
+
+            $hasConflict = Transaction::where('status', 'paid')
+                ->where('id', '!=', $transaction->id)
+                ->whereNotNull('training_booking_id')
+                ->whereHas('trainingBooking.dates', function ($query) use ($booking) {
+                    $query->whereIn('training_date', $booking->dates->pluck('training_date'));
+                })
+                ->exists();
+
+            if ($hasConflict) {
+                throw new \RuntimeException('Tanggal pelatihan berbenturan dengan booking yang sudah dibayar.');
+            }
+
+            $booking->update([
+                'locked_at' => now(),
+                'locked_by_transaction_id' => $transaction->id,
+            ]);
+        });
+    }
+
+    /**
+     * Show payment page
+     */
+    public function showPaymentPage($programSlug)
+    {
+        $user = Auth::user();
+
+        // Get program by slug
+        $program = DB::table('data_programs')
+            ->leftJoin('data_trainers', 'data_programs.instructor_id', '=', 'data_trainers.id')
+            ->select(
+                'data_programs.*',
+                'data_trainers.nama as instructor_name'
+            )
+            ->where('data_programs.slug', $programSlug)
+            ->where('data_programs.status', 'published')
+            ->first();
+
+        if (!$program) {
+            abort(404, 'Program tidak ditemukan');
+        }
+
+        if (strtolower((string) $program->category) === 'pelatihan') {
+            return redirect()->route('client.training-bookings.create', $programSlug);
+        }
+
+        // Check if user already purchased this program (paid status)
+        $hasPurchased = Transaction::where('student_id', $user->id)
+            ->where('program_id', $program->id)
+            ->where('status', 'paid')
+            ->exists();
+
+        if ($hasPurchased) {
+            return redirect()->route('client.dashboard.program')
+                ->with('info', 'Anda sudah membeli program ini. Silakan akses di dashboard Anda.');
+        }
+
+        // Check for valid pending transaction (not expired)
+        $pendingTransaction = Transaction::where('student_id', $user->id)
+            ->where('program_id', $program->id)
+            ->validPending()
+            ->first();
+
+        if ($pendingTransaction) {
+            return redirect()->route('client.dashboard.transaction')
+                ->with('warning', 'Anda memiliki transaksi pending untuk program ini. Silakan selesaikan pembayaran atau tunggu hingga kadaluarsa.');
+        }
+
+        // Mark expired pending transactions as expired
+        Transaction::where('student_id', $user->id)
+            ->where('program_id', $program->id)
+            ->expiredPending()
+            ->update(['status' => 'expired']);
+
+        // Decode JSON fields
+        $program->tools = json_decode($program->tools, true) ?? [];
+        $program->learning_materials = json_decode($program->learning_materials, true) ?? [];
+        $program->benefits = json_decode($program->benefits, true) ?? [];
+
+        // Get recommended vouchers
+        $recommendedVouchers = \App\Models\Voucher::where('is_active', true)
+            ->where(function ($query) {
+                $query->whereNull('start_date')
+                      ->orWhere('start_date', '<=', now());
+            })
+            ->where(function ($query) {
+                $query->whereNull('end_date')
+                      ->orWhereDate('end_date', '>=', now()->toDateString());
+            })
+            ->get()
+            ->filter(function ($voucher) {
+                return $voucher->isValid();
+            })
+            ->take(3);
+
+        return view('client.program.pembayaran', compact('program', 'recommendedVouchers'));
+    }
+
+    /**
+     * Create transaction and get Snap token
+     */
+    public function createTransaction(Request $request)
+    {
+        try {
+            $user = Auth::user();
+            $programId = $request->program_id;
+            $voucherCode = $request->voucher_code;
+
+            // Get program details
+            $program = DB::table('data_programs')->where('id', $programId)->first();
+            
+            if (!$program) {
+                return response()->json(['error' => 'Program tidak ditemukan'], 404);
+            }
+
+            // Check if user already purchased this program
+            $hasPurchased = Transaction::where('student_id', $user->id)
+                ->where('program_id', $programId)
+                ->where('status', 'paid')
+                ->exists();
+
+            if ($hasPurchased) {
+                return response()->json(['error' => 'Anda sudah membeli program ini'], 400);
+            }
+
+            // Check program quota if set
+            if ($program->quota && $program->enrolled_count >= $program->quota) {
+                return response()->json(['error' => 'Mohon maaf, kuota pendaftaran untuk program ini sudah penuh.'], 400);
+            }
+
+            // Calculate Price & Discount
+            $price = (float) $program->price;
+            $discountAmount = 0;
+            $voucherId = null;
+
+            if ($voucherCode) {
+                $voucher = \App\Models\Voucher::where('code', $voucherCode)->first();
+                if ($voucher && $voucher->isValid()) {
+                    $discountAmount = $voucher->calculateDiscount($price);
+                    $voucherId = $voucher->id;
+                } else {
+                    return response()->json(['error' => 'Voucher tidak valid atau sudah tidak berlaku'], 400);
+                }
+            }
+
+            $finalPrice = max(0, $price - $discountAmount);
+
+            // Handle Free Programs (Rp 0 or 100% discount voucher)
+            // Midtrans requires gross_amount >= 0.01, so free programs bypass the payment gateway
+            if ($finalPrice <= 0) {
+                // Invalidate any previous pending transactions for this program & user
+                Transaction::where('student_id', $user->id)
+                    ->where('program_id', $programId)
+                    ->validPending()
+                    ->update(['status' => 'cancelled']);
+
+                $transactionCode = Transaction::generateTransactionCode();
+                $orderId = Transaction::generateOrderId($programId, $user->id);
+
+                DB::transaction(function () use ($transactionCode, $orderId, $user, $programId, $voucherId, $discountAmount, &$transaction) {
+                    $transaction = Transaction::create([
+                        'transaction_code' => $transactionCode,
+                        'midtrans_order_id' => $orderId,
+                        'student_id' => $user->id,
+                        'program_id' => $programId,
+                        'voucher_id' => $voucherId,
+                        'amount' => 0,
+                        'discount_amount' => $discountAmount,
+                        'payment_method' => 'free',
+                        'status' => 'paid',
+                        'payment_date' => now(),
+                    ]);
+
+                    // Create enrollment so program appears in "Program Saya"
+                    $this->createEnrollment($transaction);
+                });
+
+                return response()->json([
+                    'is_free' => true,
+                    'redirect_url' => route('client.payment.finish', ['order_id' => $orderId, 'status' => 'success']),
+                ]);
+            }
+
+            // Check for valid pending transaction
+            // Only return existing if no new voucher is applied so we can recreate if needed
+            $pendingTransactionQuery = Transaction::where('student_id', $user->id)
+                ->where('program_id', $programId)
+                ->validPending();
+
+            // If applying a voucher, invalidate the previous pending transaction to create a new one with discount
+            if ($voucherId) {
+                $pendingTransactionQuery->update(['status' => 'cancelled']);
+                $pendingTransaction = null;
+            } else {
+                $pendingTransaction = $pendingTransactionQuery->first();
+            }
+
+            if ($pendingTransaction && $pendingTransaction->snap_token) {
+                // Return existing snap token if still valid
+                return response()->json([
+                    'snap_token' => $pendingTransaction->snap_token,
+                    'order_id' => $pendingTransaction->midtrans_order_id,
+                ]);
+            }
+
+            // Mark expired pending transactions as expired
+            Transaction::where('student_id', $user->id)
+                ->where('program_id', $programId)
+                ->expiredPending()
+                ->update(['status' => 'expired']);
+
+            // Generate IDs
+            $transactionCode = Transaction::generateTransactionCode();
+            $orderId = Transaction::generateOrderId($programId, $user->id);
+
+            // Set expiration time (3 hours from now)
+            $expiresAt = Carbon::now()->addHours(3);
+
+            // Prepare item details
+            $itemDetails = [
+                [
+                    'id' => $programId,
+                    'price' => (int) $price,
+                    'quantity' => 1,
+                    'name' => substr($program->program, 0, 50), // Max 50 chars for Midtrans
+                ]
+            ];
+
+            if ($discountAmount > 0) {
+                $itemDetails[] = [
+                    'id' => 'VOUCHER',
+                    'price' => -(int) $discountAmount,
+                    'quantity' => 1,
+                    'name' => 'Discount ' . $voucher->name,
+                ];
+            }
+
+            // Prepare Snap parameters
+            $params = [
+                'transaction_details' => [
+                    'order_id' => $orderId,
+                    'gross_amount' => (int) $finalPrice,
+                ],
+                'customer_details' => [
+                    'first_name' => $user->name,
+                    'email' => $user->email,
+                    'phone' => $user->phone ?? '',
+                ],
+                'item_details' => $itemDetails,
+                'callbacks' => [
+                    'finish' => route('client.payment.finish'),
+                ],
+                'expiry' => [
+                    'start_time' => Carbon::now()->format('Y-m-d H:i:s O'),
+                    'unit' => 'hours',
+                    'duration' => 3,
+                ]
+            ];
+
+            // Get Snap token
+            $snapToken = Snap::getSnapToken($params);
+
+            // Create transaction record
+            $transaction = Transaction::create([
+                'transaction_code' => $transactionCode,
+                'midtrans_order_id' => $orderId,
+                'snap_token' => $snapToken,
+                'student_id' => $user->id,
+                'program_id' => $programId,
+                'voucher_id' => $voucherId,
+                'amount' => $finalPrice,
+                'discount_amount' => $discountAmount,
+                'payment_method' => 'midtrans',
+                'status' => 'pending',
+                'expires_at' => $expiresAt,
+            ]);
+
+            return response()->json([
+                'snap_token' => $snapToken,
+                'order_id' => $orderId,
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Midtrans Error: ' . $e->getMessage());
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Create a Midtrans transaction for an admin-approved training booking.
+     */
+    public function createTrainingTransaction(TrainingBooking $trainingBooking)
+    {
+        $user = Auth::user();
+
+        if ((int) $trainingBooking->student_id !== (int) $user->id) {
+            return response()->json(['error' => 'Pemesanan tidak ditemukan'], 404);
+        }
+
+        if ($trainingBooking->schedule_status !== 'approved') {
+            return response()->json(['error' => 'Jadwal belum disetujui admin'], 400);
+        }
+
+        if ($trainingBooking->locked_at) {
+            return response()->json(['error' => 'Jadwal pelatihan ini sudah dikunci'], 400);
+        }
+
+        $trainingBooking->load('dates');
+        $hasPaidConflict = Transaction::where('status', 'paid')
+            ->where('training_booking_id', '!=', $trainingBooking->id)
+            ->whereHas('trainingBooking.dates', function ($query) use ($trainingBooking) {
+                $query->whereIn('training_date', $trainingBooking->dates->pluck('training_date'));
+            })
+            ->exists();
+
+        if ($hasPaidConflict) {
+            return response()->json(['error' => 'Sebagian tanggal sudah dikunci oleh pemesanan lain'], 409);
+        }
+
+        $existingTransaction = $trainingBooking->transactions()
+            ->whereIn('status', ['pending', 'paid'])
+            ->latest()
+            ->first();
+
+        if ($existingTransaction?->status === 'paid') {
+            return response()->json(['error' => 'Pemesanan ini sudah dibayar'], 400);
+        }
+
+        if ($existingTransaction?->isValidPending()) {
+            return response()->json([
+                'snap_token' => $existingTransaction->snap_token,
+                'order_id' => $existingTransaction->midtrans_order_id,
+            ]);
+        }
+
+        if ($existingTransaction) {
+            $existingTransaction->update(['status' => 'expired']);
+        }
+
+        $trainingBooking->load('program');
+        $orderId = Transaction::generateOrderId($trainingBooking->program_id, $user->id) . '-TRAINING-' . $trainingBooking->id;
+        $expiresAt = Carbon::now()->addHours(3);
+        $amount = (int) $trainingBooking->total_amount;
+
+        if ($amount < 1 || $amount !== ((int) $trainingBooking->training_days * (int) $trainingBooking->daily_price)) {
+            return response()->json(['error' => 'Nominal pemesanan tidak valid'], 422);
+        }
+
+        $snapToken = Snap::getSnapToken([
+            'transaction_details' => [
+                'order_id' => $orderId,
+                'gross_amount' => $amount,
+            ],
+            'customer_details' => [
+                'first_name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone ?? '',
+            ],
+            'item_details' => [[
+                'id' => 'TRAINING-' . $trainingBooking->id,
+                'price' => $amount,
+                'quantity' => 1,
+                'name' => substr('Pelatihan ' . $trainingBooking->program->program, 0, 50),
+            ]],
+            'callbacks' => [
+                'finish' => route('client.payment.finish'),
+            ],
+            'expiry' => [
+                'start_time' => Carbon::now()->format('Y-m-d H:i:s O'),
+                'unit' => 'hours',
+                'duration' => 3,
+            ],
+        ]);
+
+        $transaction = $trainingBooking->transactions()->create([
+            'transaction_code' => Transaction::generateTransactionCode(),
+            'midtrans_order_id' => $orderId,
+            'snap_token' => $snapToken,
+            'student_id' => $user->id,
+            'program_id' => $trainingBooking->program_id,
+            'amount' => $amount,
+            'payment_method' => 'midtrans',
+            'status' => 'pending',
+            'expires_at' => $expiresAt,
+        ]);
+
+        return response()->json([
+            'snap_token' => $transaction->snap_token,
+            'order_id' => $transaction->midtrans_order_id,
+        ]);
+    }
+
+    /**
+     * Apply voucher API returning calculated discount
+     */
+    public function applyVoucher(Request $request)
+    {
+        try {
+            $request->validate([
+                'voucher_code' => 'required|string',
+                'program_id' => 'required|integer',
+            ]);
+
+            $voucherCode = $request->voucher_code;
+            $programId = $request->program_id;
+
+            $program = DB::table('data_programs')->where('id', $programId)->first();
+            
+            if (!$program) {
+                return response()->json(['error' => 'Program tidak ditemukan'], 404);
+            }
+
+            $voucher = \App\Models\Voucher::where('code', $voucherCode)->first();
+
+            if (!$voucher) {
+                return response()->json(['error' => 'Voucher tidak ditemukan'], 404);
+            }
+
+            if (!$voucher->isValid()) {
+                return response()->json(['error' => 'Voucher tidak valid, sudah kadaluarsa, atau melebihi batas penggunaan.'], 400);
+            }
+
+            $price = (float) $program->price;
+            $discountAmount = $voucher->calculateDiscount($price);
+            $finalPrice = max(0, $price - $discountAmount);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Voucher berhasil diterapkan',
+                'discount_amount' => $discountAmount,
+                'final_price' => $finalPrice,
+                'original_price' => $price,
+                'voucher_code' => $voucher->code,
+                'voucher_name' => $voucher->name,
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Voucher Apply Error: ' . $e->getMessage());
+            return response()->json(['error' => 'Terjadi kesalahan saat menerapkan voucher'], 500);
+        }
+    }
+
+    /**
+     * Handle Midtrans callback/notification
+     */
+    public function callback(Request $request)
+    {
+        try {
+            $notification = new Notification();
+
+            $transactionStatus = $notification->transaction_status;
+            $fraudStatus = $notification->fraud_status;
+            $orderId = $notification->order_id;
+
+            // Find transaction
+            $transaction = Transaction::where('midtrans_order_id', $orderId)->first();
+
+            if (!$transaction) {
+                return response()->json(['message' => 'Transaction not found'], 404);
+            }
+
+            // Update transaction based on status
+            if ($transactionStatus == 'capture') {
+                if ($fraudStatus == 'accept') {
+                    $transaction->status = 'paid';
+                    $transaction->payment_date = now();
+                }
+            } else if ($transactionStatus == 'settlement') {
+                $transaction->status = 'paid';
+                $transaction->payment_date = now();
+            } else if ($transactionStatus == 'pending') {
+                $transaction->status = 'pending';
+            } else if ($transactionStatus == 'deny' || $transactionStatus == 'cancel') {
+                $transaction->status = 'cancelled';
+            } else if ($transactionStatus == 'expire') {
+                $transaction->status = 'expired';
+            }
+
+            // Update Midtrans data
+            $transaction->midtrans_transaction_id = $notification->transaction_id ?? null;
+            $transaction->midtrans_status = $transactionStatus;
+            $transaction->midtrans_response = json_encode($notification);
+            $transaction->payment_method = $notification->payment_type ?? 'midtrans';
+            $transaction->save();
+
+            // If paid, create enrollment
+            if ($transaction->status == 'paid') {
+                $this->lockTrainingBooking($transaction);
+                $this->createEnrollment($transaction);
+            }
+
+            return response()->json(['message' => 'Callback processed']);
+
+        } catch (\Exception $e) {
+            Log::error('Midtrans Callback Error: ' . $e->getMessage());
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Handle payment finish redirect
+     */
+    public function finish(Request $request)
+    {
+        $orderId = $request->query('order_id');
+        $transaction = Transaction::where('midtrans_order_id', $orderId)->first();
+
+        if (!$transaction) {
+            return redirect()->route('client.home')
+                ->with('error', 'Transaksi tidak ditemukan');
+        }
+
+        // Check and update status from Midtrans API directly
+        // This handles the case where redirect happens before callback
+        if ($transaction->status === 'pending') {
+            $this->syncTransactionStatus($transaction);
+        }
+
+        // Ensure enrollment exists if transaction is paid
+        if ($transaction->status === 'paid') {
+            $this->lockTrainingBooking($transaction);
+            $this->createEnrollment($transaction);
+        }
+
+        // Load program relation
+        $transaction->load('program');
+
+        $status = $transaction->status;
+        $message = '';
+
+        switch ($status) {
+            case 'paid':
+                $message = 'Pembayaran berhasil! Anda sekarang terdaftar di program ini.';
+                $type = 'success';
+                break;
+            case 'pending':
+                $remainingTime = $transaction->getRemainingTimeFormatted();
+                $message = "Pembayaran Anda sedang menunggu. Selesaikan dalam {$remainingTime}.";
+                $type = 'info';
+                break;
+            case 'expired':
+                $message = 'Transaksi sudah kadaluarsa. Silakan buat transaksi baru.';
+
+                $type = 'error';
+                break;
+            default:
+                $message = 'Pembayaran gagal atau dibatalkan.';
+                $type = 'error';
+                break;
+        }
+
+        return view('client.program.payment-status', [
+            'transaction' => $transaction,
+            'message' => $message,
+            'type' => $type
+        ]);
+    }
+
+    /**
+     * Resume payment for pending transaction
+     */
+    public function resumePayment($transactionId)
+    {
+        $user = Auth::user();
+        $transaction = Transaction::where('id', $transactionId)
+            ->where('student_id', $user->id)
+            ->first();
+
+        if (!$transaction) {
+            return response()->json(['error' => 'Transaksi tidak ditemukan'], 404);
+        }
+
+        if ($transaction->status !== 'pending') {
+            return response()->json(['error' => 'Transaksi tidak dapat dilanjutkan'], 400);
+        }
+
+        if ($transaction->isExpired()) {
+            $transaction->status = 'expired';
+            $transaction->save();
+            return response()->json(['error' => 'Transaksi sudah kadaluarsa'], 400);
+        }
+
+        if (!$transaction->snap_token) {
+            return response()->json(['error' => 'Token pembayaran tidak tersedia'], 400);
+        }
+
+        return response()->json([
+            'snap_token' => $transaction->snap_token,
+            'order_id' => $transaction->midtrans_order_id,
+        ]);
+    }
+
+    /**
+     * Cancel pending transaction
+     */
+    public function cancelTransaction($transactionId)
+    {
+        $user = Auth::user();
+        $transaction = Transaction::where('id', $transactionId)
+            ->where('student_id', $user->id)
+            ->first();
+
+        if (!$transaction) {
+            return response()->json(['error' => 'Transaksi tidak ditemukan'], 404);
+        }
+
+        if ($transaction->status !== 'pending') {
+            return response()->json(['error' => 'Hanya transaksi pending yang dapat dibatalkan'], 400);
+        }
+
+        // Update status to cancelled
+        $transaction->status = 'cancelled';
+        $transaction->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Transaksi berhasil dibatalkan'
+        ]);
+    }
+
+    /**
+     * Create enrollment after successful payment
+     */
+    private function createEnrollment($transaction)
+    {
+        try {
+            // Check if enrollment already exists
+            $exists = DB::table('enrollments')
+                ->where('student_id', $transaction->student_id)
+                ->where('program_id', $transaction->program_id)
+                ->exists();
+
+            if (!$exists) {
+                DB::table('enrollments')->insert([
+                    'student_id' => $transaction->student_id,
+                    'program_id' => $transaction->program_id,
+                    'transaction_id' => $transaction->id,
+                    'status' => 'active',
+                    'enrolled_at' => now(),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+                // Update enrolled_count in program
+                DB::table('data_programs')
+                    ->where('id', $transaction->program_id)
+                    ->increment('enrolled_count');
+            }
+        } catch (\Exception $e) {
+            Log::error('Enrollment Creation Error: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Sync transaction status from Midtrans API
+     * This handles the case where redirect happens before callback
+     */
+    private function syncTransactionStatus($transaction)
+    {
+        try {
+            // Call Midtrans Status API
+            $serverKey = config('midtrans.server_key');
+            $orderId = $transaction->midtrans_order_id;
+            
+            $url = config('midtrans.is_production') 
+                ? "https://api.midtrans.com/v2/{$orderId}/status"
+                : "https://api.sandbox.midtrans.com/v2/{$orderId}/status";
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Accept: application/json',
+                'Content-Type: application/json',
+                'Authorization: Basic ' . base64_encode($serverKey . ':')
+            ]);
+
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($httpCode !== 200) {
+                Log::warning("Midtrans Status API returned {$httpCode} for order {$orderId}");
+                return;
+            }
+
+            $data = json_decode($response, true);
+            
+            if (!$data || !isset($data['transaction_status'])) {
+                return;
+            }
+
+            $transactionStatus = $data['transaction_status'];
+            $fraudStatus = $data['fraud_status'] ?? 'accept';
+
+            // Update transaction based on status
+            $newStatus = null;
+            if ($transactionStatus == 'capture' || $transactionStatus == 'settlement') {
+                if ($fraudStatus == 'accept' || $fraudStatus == null) {
+                    $newStatus = 'paid';
+                    $transaction->payment_date = now();
+                }
+            } else if ($transactionStatus == 'pending') {
+                $newStatus = 'pending';
+            } else if ($transactionStatus == 'deny' || $transactionStatus == 'cancel') {
+                $newStatus = 'cancelled';
+            } else if ($transactionStatus == 'expire') {
+                $newStatus = 'expired';
+            }
+
+            if ($newStatus && $newStatus !== $transaction->status) {
+                $transaction->status = $newStatus;
+                $transaction->midtrans_transaction_id = $data['transaction_id'] ?? null;
+                $transaction->midtrans_status = $transactionStatus;
+                $transaction->midtrans_response = json_encode($data);
+                $transaction->payment_method = $data['payment_type'] ?? 'midtrans';
+                $transaction->save();
+
+                // If paid, create enrollment
+                if ($newStatus === 'paid') {
+                    $this->lockTrainingBooking($transaction);
+                    $this->createEnrollment($transaction);
+                }
+
+                Log::info("Transaction {$orderId} status synced to {$newStatus}");
+            }
+
+        } catch (\Exception $e) {
+            Log::error('Midtrans Status Sync Error: ' . $e->getMessage());
+        }
+    }
+}
